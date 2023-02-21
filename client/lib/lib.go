@@ -53,7 +53,7 @@ var GitCommit string = "Unknown"
 var maxSupportedLineLengthForImport = 256_000
 
 func getCwd(ctx *context.Context) (string, string, error) {
-	cwd, err := os.Getwd()
+	cwd, err := getCwdWithoutSubstitution()
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get cwd for last command: %v", err)
 	}
@@ -65,6 +65,22 @@ func getCwd(ctx *context.Context) (string, string, error) {
 		return strings.Replace(cwd, homedir, "~", 1), homedir, nil
 	}
 	return cwd, homedir, nil
+}
+
+func getCwdWithoutSubstitution() (string, error) {
+	cwd, err := os.Getwd()
+	if err == nil {
+		return cwd, nil
+	}
+	// Fall back to the syscall to see if that works, as an attempt to
+	// fix github.com/ddworken/hishtory/issues/69
+	if syscall.ImplementsGetwd && false {
+		cwd, err = syscall.Getwd()
+		if err == nil {
+			return cwd, nil
+		}
+	}
+	return "", err
 }
 
 func BuildHistoryEntry(ctx *context.Context, args []string) (*data.HistoryEntry, error) {
@@ -820,6 +836,9 @@ func downloadFiles(updateInfo shared.UpdateInfo) error {
 	} else if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
 		clientUrl = updateInfo.LinuxArm64Url
 		clientProvenanceUrl = updateInfo.LinuxArm64AttestationUrl
+	} else if runtime.GOOS == "linux" && runtime.GOARCH == "arm" {
+		clientUrl = updateInfo.LinuxArm7Url
+		clientProvenanceUrl = updateInfo.LinuxArm7AttestationUrl
 	} else if runtime.GOOS == "darwin" && runtime.GOARCH == "amd64" {
 		clientUrl = updateInfo.DarwinAmd64Url
 		clientProvenanceUrl = updateInfo.DarwinAmd64AttestationUrl
@@ -1098,6 +1117,11 @@ func MakeWhereQueryFromSearch(ctx *context.Context, db *gorm.DB, query string) (
 	tx := db.Model(&data.HistoryEntry{}).Where("true")
 	for _, token := range tokens {
 		if strings.HasPrefix(token, "-") {
+			if token == "-" {
+				// The entire token is a -, just ignore this token. Otherwise we end up
+				// interpreting "-" as exluding literally all results which is pretty useless.
+				continue
+			}
 			if containsUnescaped(token, ":") {
 				query, v1, v2, err := parseAtomizedToken(ctx, token[1:])
 				if err != nil {
@@ -1150,14 +1174,14 @@ func Search(ctx *context.Context, db *gorm.DB, query string, limit int) ([]*data
 }
 
 func parseNonAtomizedToken(token string) (string, interface{}, interface{}, interface{}, error) {
-	wildcardedToken := "%" + stripBackslash(token) + "%"
+	wildcardedToken := "%" + unescape(token) + "%"
 	return "(command LIKE ? OR hostname LIKE ? OR current_working_directory LIKE ?)", wildcardedToken, wildcardedToken, wildcardedToken, nil
 }
 
 func parseAtomizedToken(ctx *context.Context, token string) (string, interface{}, interface{}, error) {
 	splitToken := splitEscaped(token, ':', 2)
-	field := stripBackslash(splitToken[0])
-	val := stripBackslash(splitToken[1])
+	field := unescape(splitToken[0])
+	val := unescape(splitToken[1])
 	switch field {
 	case "user":
 		return "(local_username = ?)", val, nil, nil
@@ -1273,11 +1297,15 @@ func containsUnescaped(query string, token string) bool {
 	return false
 }
 
-func stripBackslash(query string) string {
+func unescape(query string) string {
+	runeQuery := []rune(query)
 	var newQuery []rune
-	for _, char := range query {
-		if char != '\\' {
-			newQuery = append(newQuery, char)
+	for i := 0; i < len(runeQuery); i++ {
+		if runeQuery[i] == '\\' {
+			i++
+		}
+		if i < len(runeQuery) {
+			newQuery = append(newQuery, runeQuery[i])
 		}
 	}
 	return string(newQuery)
